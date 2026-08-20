@@ -279,7 +279,7 @@ jobs:
           # MonkeyDev 的 pack.sh 在本项目的 TargetApp 目录结构下，会把整份 base app
           # 作为子目录 bili-universal.app 再嵌进 .app 内部，导致 IPA 体积翻倍（约 554MB）。
           # iOS 只加载顶层 .app，嵌套那份纯属重复，打包前删掉。
-          NESTED=$(find "$APP_SRC" -maxdepth 1 -type d -name "*.app")
+          NESTED=$(find "$APP_SRC" -maxdepth 1 -mindepth 1 -type d -name "*.app")
           if [ -n "$NESTED" ]; then
             echo "清理嵌套重复 base app:"
             du -sh $NESTED
