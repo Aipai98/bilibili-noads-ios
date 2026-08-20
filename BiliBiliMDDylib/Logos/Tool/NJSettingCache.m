@@ -40,11 +40,10 @@
 #pragma mark - Do Init
 
 - (void)doInit {
-    YYCache *cache = [[NSClassFromString(@"YYCache") alloc] initWithName:@"NJCache"];
-    cache.memoryCache.costLimit = 50 * 1024 * 1024; // 50MB
-    cache.memoryCache.countLimit = 1000;            // 最多 1000 个对象
-    cache.diskCache.costLimit = 400 * 1024 * 1024;  // 400MB
-    self.cache = cache;
+    // [修复 v3.1.6] 原来这里用 NSClassFromString(@"YYCache") 建 YYCache，
+    // 但工程从未编译 YYCache 实现（只有头文件），运行时拿到 nil -> 设置全失效。
+    // 改用系统自带的 NSUserDefaults（持久化、必然可用）。
+    self.cache = [NSUserDefaults standardUserDefaults];
 }
 
 
@@ -74,8 +73,7 @@
 /// 保存默认播放速度
 - (void)saveDefaultPlaybackRate:(NSString *)rate {
     [self.cache setObject:rate
-                   forKey:NJ_SETTING_DEFAULT_PLAYBACK_RATE_KEY
-                withBlock:nil];
+                   forKey:NJ_SETTING_DEFAULT_PLAYBACK_RATE_KEY];
 }
 
 #pragma mark 关注的默认版块
@@ -95,11 +93,18 @@
 /// 保存关注的默认版块
 - (void)saveFollowDefaultTab:(NSString *)tab {
     [self.cache setObject:tab
-                   forKey:NJ_SETTING_FOLLOW_DEFAULT_TAB_KEY
-                withBlock:nil];
+                   forKey:NJ_SETTING_FOLLOW_DEFAULT_TAB_KEY];
 }
 
 #pragma mark - Private Methods
 
 #pragma mark - Property Methods
+@end
+
+@implementation NSUserDefaults (NJSettingCache)
+
+- (BOOL)containsObjectForKey:(NSString *)key {
+    return [self objectForKey:key] != nil;
+}
+
 @end

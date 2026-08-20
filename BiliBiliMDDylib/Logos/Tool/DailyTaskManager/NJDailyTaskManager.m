@@ -6,11 +6,10 @@
 //
 
 #import "NJDailyTaskManager.h"
-#import "YYCache.h"
 
 @interface NJDailyTaskManager ()
 
-@property (nonatomic, strong) YYCache *cache;
+@property (nonatomic, strong) NSUserDefaults *cache;
 
 @end
 
@@ -28,7 +27,9 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _cache = [[NSClassFromString(@"YYCache") alloc] initWithName:@"nj_daily_task_cache"];
+        // [修复 v3.1.6] 原用 NSClassFromString(@"YYCache")，工程未编译 YYCache 实现，
+        // 运行时拿到 nil -> 每日任务（自动领福利等）全部失效。改用 NSUserDefaults。
+        _cache = [NSUserDefaults standardUserDefaults];
     }
     return self;
 }
