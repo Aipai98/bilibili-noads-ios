@@ -1,0 +1,343 @@
+name: 从上游源码包重新构建(去现场版)
+
+# 直接用上游源码 zip(TouchFriend/BiliBiliMApp@3.1.0)重新构建，去现场版的人只要按这个下。
+# 与 build-ipa.yml 区别：这里 actions/checkout@v4 替换为下上游源码 zip + 修补 NJLiveDetailAd.xm(人数修复)
+# + 强制让 xcodebuild 走 Logos 预处理重新生成 .mm，完全绕开仓库的提交 .mm。
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_zip:
+        description: "上游源码 zip URL(默认 TouchFriend 3.1.0 源码包)"
+        required: false
+        default: "https://github.com/TouchFriend/BiliBiliMApp/archive/refs/tags/3.1.0.zip"
+      base_app_url:
+        description: "脱壳 base app 直链"
+        required: false
+        default: "https://github.com/TouchFriend/BiliBiliMApp/releases/download/3.1.0/bili-universal_8.89.0.app.zip"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 从上游源码重新构建
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: 检出仓库(取 Vendor/libellekit.dylib 等本地资产)
+        uses: actions/checkout@v4
+
+      - name: 确保 Rosetta 2 可用(x86_64 工具链)
+        run: |
+          if [ "$(uname -m)" = "arm64" ]; then
+            if /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
+              echo "Rosetta 2 OK"
+            else
+              sudo softwareupdate --install-rosetta --agree-to-license || true
+            fi
+          else
+            echo "x86_64 runner, 跳过"
+          fi
+
+      - name: 安装 theos + MonkeyDev
+        run: |
+          set -euo pipefail
+          THEOS=/opt/theos; MONKEYDEV=/opt/MonkeyDev
+          sudo mkdir -p "$THEOS" && sudo chown -R "$(whoami)" "$THEOS"
+          sudo mkdir -p "$MONKEYDEV" && sudo chown -R "$(whoami)" "$MONKEYDEV"
+          git clone --depth 1 --recursive --shallow-submodules https://github.com/theos/theos.git "$THEOS"
+          git clone --depth 1 https://github.com/AloneMonkey/MonkeyDev.git "$MONKEYDEV"
+          chmod +x "$MONKEYDEV"/bin/* "$MONKEYDEV"/Tools/* || true
+          test -f "$THEOS/vendor/lib/libroot.a" && echo "libroot.a OK"
+          test -d "$MONKEYDEV/Frameworks" && echo "MonkeyDev Frameworks OK"
+          "$MONKEYDEV/bin/monkeyparser" 2>&1 | head -2 || true
+
+      - name: 下载并解压上游源码 zip
+        run: |
+          set -euo pipefail
+          cd "$HOME"
+          curl -fL --retry 3 -o upstream_src.zip "${{ inputs.upstream_zip }}"
+          echo "zip 大小: $(du -h upstream_src.zip | cut -f1)"
+          unzip -q upstream_src.zip
+          # GitHub 源码 zip 解压后是 BiliBiliMApp-3.1.0
+          ls -d BiliBiliMApp-* || ls
+          SRC=$(ls -d BiliBiliMApp-* | head -1)
+          echo "源码根: $SRC"
+          # 把整个源码放进一个固定路径 workspace_src/
+          rm -rf workspace_src
+          cp -R "$SRC" workspace_src
+
+      - name: 复制本地 Vendor 资产(ElleKit)到源码树
+        run: |
+          mkdir -p "$HOME/workspace_src/BiliBiliMApp/Vendor"
+          cp "$GITHUB_WORKSPACE/BiliBiliMApp/Vendor/libellekit.dylib" "$HOME/workspace_src/BiliBiliMApp/Vendor/libellekit.dylib"
+          chmod 755 "$HOME/workspace_src/BiliBiliMApp/Vendor/libellekit.dylib"
+          ls -la "$HOME/workspace_src/BiliBiliMApp/Vendor/"
+
+      - name: 修补 NJLiveDetailAd.xm(去掉 4 处杀人数的 hook)
+        working-directory: workspace_src
+        run: |
+          set -euo pipefail
+          XM="BiliBiliMDDylib/Logos/Home/Live/NJLiveDetailAd.xm"
+          test -f "$XM" || { echo "::error::找不到 $XM"; exit 1; }
+          cp "$XM" "${XM}.orig"
+
+          python3 - <<'PY'
+          import re
+          p = "BiliBiliMDDylib/Logos/Home/Live/NJLiveDetailAd.xm"
+          s = open(p, encoding="utf-8").read()
+          orig_len = len(s)
+
+          # 1) LynxView 的 %hook 块：// 热门榜上一段(整段 8 个方法返回 nil)
+          lynx_block = (
+              "// 人气榜\n"
+              "%hook BBLiveBasePopularHotRankEntryView\n"
+              "\n"
+              "- (id)initWithFrame:(CGRect)frame {\n"
+              "    return nil;\n"
+              "}\n"
+              "\n"
+              "%end\n"
+              "\n"
+              "\n"
+              "// 人气榜\n"
+              "%hook BBLiveBasePopularRankEntryView\n"
+              "\n"
+              "- (id)initWithFrame:(CGRect)frame {\n"
+              "    return nil;\n"
+              "}\n"
+              "\n"
+              "%end\n"
+          )
+          if lynx_block in s:
+              s = s.replace(lynx_block, '')
+              print("已删除 LynxView 入口块(8 init)")
+
+          # 2) BBLiveTopRightEntranceManager 块
+          tre = (
+              "// 右上角入口，比如观赛活动、更多直播入口\n"
+              "%hook BBLiveTopRightEntranceManager\n"
+              "\n"
+              "- (id)init {\n"
+              "    return nil;\n"
+              "}\n"
+              "\n"
+              "%end\n"
+              "\n"
+          )
+          if tre in s:
+              s = s.replace(tre, '')
+              print("已删除 BBLiveTopRightEntranceManager 块")
+
+          # 3) BBLivePoliticalFullScreenTopBar 整块
+          pfs = (
+              "// 全屏topBar\n"
+              "@interface BBLivePoliticalFullScreenTopBar : UIView\n"
+              "\n"
+              "// 用户排名列表\n"
+              "@property (retain, nonatomic) UIView *userRankListEntryView;\n"
+              "\n"
+              "@end\n"
+              "\n"
+              "%hook BBLivePoliticalFullScreenTopBar\n"
+              "\n"
+              "- (void)layoutSubviews {\n"
+              "    %orig;\n"
+              "    // 用户排名列表\n"
+              "    [self.userRankListEntryView removeFromSuperview];\n"
+              "    self.userRankListEntryView = nil;\n"
+              "}\n"
+              "\n"
+              "- (void)_updateUserRankListEntryViewIfNeed {\n"
+              "    \n"
+              "}\n"
+              "\n"
+              "%end\n"
+              "\n"
+              "\n"
+          )
+          if pfs in s:
+              s = s.replace(pfs, '')
+              print("已删除 BBLivePoliticalFullScreenTopBar 块")
+
+          # 4) BBLiveVerticalTopBar 整块
+          vt = (
+              "// 竖屏topBar\n"
+              "@interface BBLiveVerticalTopBar : UIView\n"
+              "\n"
+              "// 用户排名列表\n"
+              "@property (retain, nonatomic) UIView *userRankListEntryView;\n"
+              "\n"
+              "@end\n"
+              "\n"
+              "%hook BBLiveVerticalTopBar\n"
+              "\n"
+              "- (void)layoutSubviews {\n"
+              "    %orig;\n"
+              "    // 用户排名列表\n"
+              "    [self.userRankListEntryView removeFromSuperview];\n"
+              "    self.userRankListEntryView = nil;\n"
+              "}\n"
+              "\n"
+              "- (void)_updateUserRankListEntryViewIfNeed {\n"
+              "    \n"
+              "}\n"
+              "\n"
+              "%end\n"
+              "\n"
+          )
+          if vt in s:
+              s = s.replace(vt, '')
+              print("已删除 BBLiveVerticalTopBar 块")
+
+          # 维护说明
+          s += (
+              "\n\n// [从上游源码包构建时修补 v3.1.x] 上述 4 个 hook 块已被删除，理由：\n"
+              "// 1) LynxView 类全部 init 返回 nil：会连累右上角人气值/在线人数一起被隐藏(8.89.0 人气值即 Lynx 渲染)。\n"
+              "// 2) BBLiveTopRightEntranceManager init=nil：会干掉右上角整块 UI(含人气值宿主)。\n"
+              "// 3/4) BBLivePoliticalFullScreenTopBar / BBLiveVerticalTopBar 的 layoutSubviews remove userRankListEntryView +\n"
+              "//    _updateUserRankListEntryViewIfNeed 空实现：8.89.0 中 userRankListEntryView 位置已改成显示人气值，干掉即等于隐藏人数。\n"
+              "// 热门榜/人气榜由 BBLiveBasePopular*EntryView 显式 hook initWithFrame:->nil 处理(未删除)。\n"
+          )
+
+          open(p, "w", encoding="utf-8", newline="").write(s)
+          print(f"修改: {orig_len} -> {len(s)} bytes")
+          # 断言 LynxView 引用已无
+          assert 'LynxView' not in s, "LynxView 仍有引用!"
+          print("断言: LynxView 已无引用")
+          PY
+
+      - name: 验证 MonkeyDev 工具
+        run: |
+          file /opt/MonkeyDev/bin/monkeyparser
+          /opt/MonkeyDev/bin/monkeyparser 2>&1 | head -3 || true
+
+      - name: 下载脱壳 base app 并放入 TargetApp
+        working-directory: workspace_src
+        run: |
+          set -euo pipefail
+          cd "$HOME"
+          curl -fL --retry 3 -o base-app.zip "${{ inputs.base_app_url }}"
+          mkdir -p workspace_src/BiliBiliMD/TargetApp
+          unzip -qq -o base-app.zip -d workspace_src/BiliBiliMD/TargetApp
+          rm -rf workspace_src/BiliBiliMD/TargetApp/__MACOSX
+          APP=$(find workspace_src/BiliBiliMD/TargetApp -maxdepth 4 -type d -name "*.app" | head -1)
+          if [ -z "$APP" ]; then
+            APP=$(find workspace_src/BiliBiliMD/TargetApp -maxdepth 4 -type d -name "*.app" | head -1)
+            if [ -n "$APP" ]; then mv "$APP" workspace_src/BiliBiliMD/TargetApp/; fi
+          fi
+          echo "base app: $(ls -d workspace_src/BiliBiliMD/TargetApp/*.app 2>/dev/null || find workspace_src/BiliBiliMD/TargetApp -maxdepth 4 -name '*.app')"
+          BIN=$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable" workspace_src/BiliBiliMD/TargetApp/Payload/*.app/Info.plist 2>/dev/null || echo bili-universal")
+          echo "主二进制: $BIN"
+          if otool -l "$BIN" 2>/dev/null | grep -q "LC_ENCRYPTION_INFO"; then
+            if otool -l workspace_src/BiliBiliMD/TargetApp/Payload/*.app/$BIN 2>/dev/null | grep -A4 LC_ENCRYPTION_INFO | grep -q "cryptid 1"; then
+              echo "::error::base app 仍加密,需要脱壳包"
+              exit 1
+            fi
+          fi
+          echo "base app 脱壳校验通过"
+
+      - name: CI 适配 pbxproj(只跳过 codesign，保留 Logos 预处理)
+        working-directory: workspace_src
+        run: |
+          python3 - <<'PY'
+          import sys
+          p = "BiliBiliMD.xcodeproj/project.pbxproj"
+          s = open(p, encoding="utf-8").read()
+          old = 'shellScript = "/opt/MonkeyDev/Tools/pack.sh codesign\\n";'
+          new = 'shellScript = "echo \\"[CI] 跳过 codesign，产出未签名 IPA\\"\\n";'
+          if old not in s:
+              print("::error::未找到 codesign 段"); sys.exit(1)
+          s = s.replace(old, new)
+          assert 'md --xcbp-logos' in s, "Logos 预处理段丢失"
+          open(p, "w", encoding="utf-8").write(s)
+          print("已替换 codesign 段；Logos 预处理段保留")
+          PY
+
+      - name: xcodebuild 编译(Release / arm64 / 不签名)
+        working-directory: workspace_src
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project BiliBiliMD.xcodeproj \
+            -scheme BiliBiliMD \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            build 2>&1 | tail -n 200
+
+      - name: 校验产物
+        working-directory: workspace_src
+        run: |
+          set -euo pipefail
+          PRODUCTS=build/Build/Products/Release-iphoneos
+          DYLIB="$PRODUCTS/libBiliBiliMDDylib.dylib"
+          test -f "$DYLIB" || { echo "::error::无 dylib"; exit 1; }
+          echo "dylib: $(lipo -info $DYLIB)  ($(wc -c < $DYLIB) bytes)"
+          # 人数修复断言：LynxView 引用应已无
+          if grep -a -q "LynxView" "$DYLIB"; then echo "::error::dylib 仍有 LynxView 引用"; exit 1; fi
+          echo "✅ dylib 无人气值杀手 LynxView 引用"
+
+      - name: 注入 ElleKit + ad-hoc 重签 + 打包
+        working-directory: workspace_src
+        run: |
+          set -euo pipefail
+          APP_SRC="build/Build/Products/Release-iphoneos/BiliBiliMD.app"
+          FRAME="$APP_SRC/Frameworks"
+          test -d "$FRAME" || { echo "::error::无 Frameworks"; exit 1; }
+          cp -f BiliBiliMApp/Vendor/libellekit.dylib "$FRAME/libellekit.dylib"
+          chmod 755 "$FRAME/libellekit.dylib"
+          for d in "$FRAME"/*.dylib; do
+            [ -f "$d" ] || continue
+            if otool -L "$d" 2>/dev/null | grep -q libsubstrate; then
+              install_name_tool -change '@executable_path/Frameworks/libsubstrate.dylib' \
+                '@executable_path/Frameworks/libellekit.dylib' "$d"
+            fi
+          done
+          rm -f "$FRAME/libsubstrate.dylib"
+          codesign -f -s - --timestamp=none "$FRAME"/*.dylib
+          codesign -f -s - --timestamp=none "$APP_SRC"
+          # 整包嵌套 app 清理
+          NESTED=$(find "$APP_SRC" -maxdepth 1 -mindepth 1 -type d -name "*.app")
+          [ -n "$NESTED" ] && rm -rf $NESTED
+          VER=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_SRC/Info.plist")
+          NAME="BiliBiliMApp_${VER}_livecount-fixed_unsigned"
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP_SRC" Payload/
+          zip -qry "${NAME}.ipa" Payload
+          rm -rf Payload
+          echo "产物: ${NAME}.ipa ($(du -h ${NAME}.ipa | cut -f1))"
+          echo "ipa_name=${NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: 上传 IPA 到 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.ipa_name }}.ipa
+          path: ${{ steps.pack.outputs.ipa_name }}.ipa
+          retention-days: 30
+          compression-level: 0
+
+      - name: 创建 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd workspace_src
+          IPA=$(ls BiliBiliMApp_*_livecount-fixed_unsigned.ipa)
+          VER=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "build/Build/Products/Release-iphoneos/BiliBiliMD.app/Info.plist")
+          cat > notes.md <<EOF
+          ## 从上游源码包重新构建
+          本次包完全用上游 TouchFriend/BiliBiliMApp@3.1.0 源码 zip 重新构建，绕开仓库的 .mm；只去掉了 4 处杀人数的 hook（LynxView 整块 + BBLiveTopRightEntranceManager + BBLivePoliticalFullScreenTopBar + BBLiveVerticalTopBar），热门榜/人气榜由显式 hook 处理（未删）。TrollStore/全能签 装后：人数显示，发布/会员购/不常用服务等广告入口按你平时的设置生效。
+          EOF
+          gh release create "$TAG" "$IPA" \
+            --title "$TAG 人数修复（上游源码重打）" \
+            --notes-file notes.md
