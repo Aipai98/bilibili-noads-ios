@@ -1,0 +1,363 @@
+name: 构建未签名 IPA
+
+# 手动触发为主；打 v* tag 也会自动构建并发 Release。
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "macOS runner 镜像（monkeyparser 是 x86_64，arm64 镜像需 Rosetta）"
+        required: false
+        default: "macos-15"
+        type: choice
+        options:
+          - macos-15
+          - macos-14
+          - macos-13
+      base_app_url:
+        description: "已脱壳 bili-universal.app 压缩包直链（留空则用下面的 release/asset 组合）"
+        required: false
+        default: ""
+      base_app_repo:
+        description: "提供脱壳包的仓库"
+        required: false
+        default: "TouchFriend/BiliBiliMApp"
+      base_app_tag:
+        description: "脱壳包所在 release tag"
+        required: false
+        default: "3.1.0"
+      base_app_asset:
+        description: "脱壳包资源名"
+        required: false
+        default: "bili-universal_8.89.0.app.zip"
+      make_release:
+        description: "构建成功后是否创建 GitHub Release"
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 编译并打包
+    runs-on: ${{ inputs.runner || 'macos-15' }}
+    timeout-minutes: 90
+
+    env:
+      THEOS: /opt/theos
+      MONKEYDEV: /opt/MonkeyDev
+      BASE_APP_REPO: ${{ inputs.base_app_repo || 'TouchFriend/BiliBiliMApp' }}
+      BASE_APP_TAG: ${{ inputs.base_app_tag || '3.1.0' }}
+      BASE_APP_ASSET: ${{ inputs.base_app_asset || 'bili-universal_8.89.0.app.zip' }}
+      BASE_APP_URL: ${{ inputs.base_app_url }}
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 打印构建环境
+        run: |
+          echo "runner 架构 : $(uname -m)"
+          echo "macOS 版本  : $(sw_vers -productVersion)"
+          echo "Xcode 路径  : $(xcode-select -p)"
+          xcodebuild -version
+          echo "可用 SDK:"
+          xcodebuild -showsdks | grep -i ios || true
+
+      # monkeyparser / class-dump 是 2022 年编译的 x86_64 二进制。
+      # Apple Silicon runner 上必须有 Rosetta 2 才能执行。
+      - name: 确保 Rosetta 2 可用（x86_64 工具链）
+        run: |
+          if [ "$(uname -m)" = "arm64" ]; then
+            echo "arm64 runner，检查 Rosetta 2 ..."
+            if /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
+              echo "Rosetta 2 已就绪"
+            else
+              echo "安装 Rosetta 2 ..."
+              sudo softwareupdate --install-rosetta --agree-to-license || true
+            fi
+          else
+            echo "x86_64 runner，无需 Rosetta"
+          fi
+
+      - name: 安装 theos（提供 logos 头文件与 libroot.a）
+        run: |
+          sudo mkdir -p "$THEOS"
+          sudo chown -R "$(whoami)" "$THEOS"
+          git clone --depth 1 --recursive --shallow-submodules \
+            https://github.com/theos/theos.git "$THEOS"
+          echo "--- 关键文件校验 ---"
+          test -f "$THEOS/vendor/lib/libroot.a" \
+            && echo "OK  libroot.a ($(stat -f%z "$THEOS/vendor/lib/libroot.a") 字节)" \
+            || { echo "FAIL 缺少 libroot.a，链接阶段必定失败"; exit 1; }
+          test -d "$THEOS/vendor/include" \
+            && echo "OK  vendor/include" \
+            || { echo "FAIL 缺少 vendor/include"; exit 1; }
+
+      # 直接取文件即可，不跑 md-install：那个脚本会去改 Xcode 模板目录，
+      # 在 CI 上既没必要又容易失败。工程需要的只是 /opt/MonkeyDev 下的文件。
+      - name: 安装 MonkeyDev（仅取文件，不做 Xcode 模板集成）
+        run: |
+          sudo mkdir -p "$MONKEYDEV"
+          sudo chown -R "$(whoami)" "$MONKEYDEV"
+          git clone --depth 1 https://github.com/AloneMonkey/MonkeyDev.git "$MONKEYDEV"
+          chmod +x "$MONKEYDEV"/bin/* "$MONKEYDEV"/Tools/* || true
+          echo "--- 关键文件校验 ---"
+          for f in bin/monkeyparser Tools/pack.sh Frameworks/libsubstrate.dylib; do
+            test -e "$MONKEYDEV/$f" && echo "OK  $f" || { echo "FAIL 缺少 $f"; exit 1; }
+          done
+
+      - name: 验证 monkeyparser 可执行
+        run: |
+          echo "架构信息:"
+          file "$MONKEYDEV/bin/monkeyparser"
+          set +e
+          OUT=$("$MONKEYDEV/bin/monkeyparser" 2>&1)
+          CODE=$?
+          set -e
+          echo "退出码 = $CODE"
+          echo "$OUT" | head -20
+          # 无参数运行会打印用法（非 0 退出很正常）。只要不是「无法执行」就算通过。
+          if echo "$OUT" | grep -qi "bad CPU type\|cannot execute\|Exec format"; then
+            echo "::error::monkeyparser 无法在本 runner 执行（x86_64 二进制 / Rosetta 缺失）。请改用 macos-13 重跑。"
+            exit 1
+          fi
+          echo "monkeyparser 可执行"
+
+      - name: 下载已脱壳的 bili-universal.app
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_APP_URL}" ]; then
+            URL="${BASE_APP_URL}"
+          else
+            URL="https://github.com/${BASE_APP_REPO}/releases/download/${BASE_APP_TAG}/${BASE_APP_ASSET}"
+          fi
+          echo "下载: $URL"
+          curl -fL --retry 3 --retry-delay 5 -o base-app.zip "$URL"
+          echo "大小: $(du -h base-app.zip | cut -f1)"
+
+          mkdir -p BiliBiliMD/TargetApp
+          unzip -qq base-app.zip -d BiliBiliMD/TargetApp
+          rm -f base-app.zip
+          rm -rf BiliBiliMD/TargetApp/__MACOSX
+
+          # 压缩包里可能多套一层目录，统一提到 TargetApp 下一级
+          APP=$(find BiliBiliMD/TargetApp -maxdepth 4 -type d -name "*.app" | head -n 1)
+          if [ -z "$APP" ]; then
+            echo "::error::压缩包里没找到 .app"
+            find BiliBiliMD/TargetApp -maxdepth 3 | head -40
+            exit 1
+          fi
+          if [ "$(dirname "$APP")" != "BiliBiliMD/TargetApp" ]; then
+            echo "上移 $APP"
+            mv "$APP" BiliBiliMD/TargetApp/
+            find BiliBiliMD/TargetApp -maxdepth 1 -type d ! -name TargetApp -empty -delete || true
+          fi
+          APP=$(find BiliBiliMD/TargetApp -maxdepth 2 -type d -name "*.app" | head -n 1)
+          echo "目标 App: $APP"
+
+          # 确认是脱壳包：cryptid 必须为 0，否则注入的 dylib 不会被加载
+          BIN=$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable" "$APP/Info.plist")
+          echo "主二进制: $BIN"
+          echo "Bundle ID: $(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Info.plist")"
+          echo "版本: $(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Info.plist")"
+          if otool -l "$APP/$BIN" 2>/dev/null | grep -A4 LC_ENCRYPTION_INFO | grep -q "cryptid 1"; then
+            echo "::error::该 App 仍处于加密状态（cryptid=1），必须使用已脱壳的包"
+            exit 1
+          fi
+          echo "脱壳校验通过 (cryptid=0)"
+
+      # 两处 CI 适配，都是「关掉在 CI 上没用还会炸的构建阶段」：
+      #  1) md --xcbp-logos：从 .xm 重新生成 .mm。仓库里 17 个 .mm 全部已提交，
+      #     且 pbxproj 编译的正是 .mm，重新生成只会引入 Logos 版本差异风险。
+      #  2) pack.sh codesign：我们产出未签名 IPA，交给 Sideloadly / AltStore 自签。
+      - name: CI 适配 pbxproj（关闭 Logos 预处理与签名阶段）
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          p = "BiliBiliMD.xcodeproj/project.pbxproj"
+          s = open(p, encoding="utf-8").read()
+          repl = {
+              'shellScript = "/opt/MonkeyDev/bin/md --xcbp-logos\\n";':
+                  'shellScript = "echo \\"[CI] 跳过 Logos 预处理，直接编译仓库内已提交的 .mm\\"\\n";',
+              'shellScript = "/opt/MonkeyDev/Tools/pack.sh codesign\\n";':
+                  'shellScript = "echo \\"[CI] 跳过 codesign，产出未签名 IPA\\"\\n";',
+          }
+          for old, new in repl.items():
+              if old not in s:
+                  print("::error::pbxproj 里没找到待替换片段: %s" % old); sys.exit(1)
+              s = s.replace(old, new)
+              print("已替换:", old.strip())
+          # pack.sh 本体必须保留（负责合并目标 App + 注入 dylib）
+          assert 'shellScript = "/opt/MonkeyDev/Tools/pack.sh\\n";' in s, "pack.sh 主阶段丢失"
+          print("已确认 pack.sh 主阶段保留")
+          open(p, "w", encoding="utf-8").write(s)
+          PY
+
+      - name: xcodebuild 编译（Release / arm64 / 不签名）
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project BiliBiliMD.xcodeproj \
+            -scheme BiliBiliMD \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            build 2>&1 | tail -n 400
+
+      - name: 校验产物并断言 LynxView 已摘除
+        id: verify
+        run: |
+          set -euo pipefail
+          PRODUCTS="build/Build/Products/Release-iphoneos"
+          ls -la "$PRODUCTS"
+
+          DYLIB="$PRODUCTS/libBiliBiliMDDylib.dylib"
+          test -f "$DYLIB" || { echo "::error::没有生成 libBiliBiliMDDylib.dylib"; exit 1; }
+          echo "dylib 架构: $(lipo -info "$DYLIB")"
+
+          # 本次修复的核心断言：整个工程只有 NJLiveDetailAd 引用过 LynxView，
+          # 且引用方式是 objc_getClass("LynxView")，字符串会落进 __cstring。
+          # 所以编译产物里只要还能搜到 LynxView，就说明 hook 没摘干净。
+          if strings -a "$DYLIB" | grep -qx "LynxView"; then
+            echo "::error::dylib 里仍存在 LynxView 字符串，一刀切 hook 未摘除干净"
+            exit 1
+          fi
+          echo "断言通过：dylib 内已无 LynxView 引用，右上角人气值不再被拦截"
+
+          # 人气榜的具体 hook 必须还在，否则等于把广告移除也一起删了
+          for cls in BBLiveBasePopularRankEntryView BBLiveBasePopularHotRankEntryView; do
+            if strings -a "$DYLIB" | grep -qx "$cls"; then
+              echo "断言通过：$cls hook 保留"
+            else
+              echo "::error::$cls hook 丢失，人气榜入口会重新出现"
+              exit 1
+            fi
+          done
+
+          APP="$PRODUCTS/BiliBiliMD.app"
+          test -d "$APP" || { echo "::error::没有生成 BiliBiliMD.app"; exit 1; }
+          BIN=$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable" "$APP/Info.plist")
+          BID=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$APP/Info.plist")
+          VER=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP/Info.plist")
+          echo "主二进制=$BIN  BundleID=$BID  版本=$VER"
+
+          # 确认 dylib 真的被注入进主二进制的加载命令
+          if otool -L "$APP/$BIN" | grep -q "libBiliBiliMDDylib.dylib"; then
+            echo "断言通过：dylib 已注入主二进制"
+            otool -L "$APP/$BIN" | grep -i "BiliBiliMDDylib\|substrate" || true
+          else
+            echo "::error::dylib 未注入主二进制，装上也不会生效"
+            otool -L "$APP/$BIN" | head -20
+            exit 1
+          fi
+
+          echo "bili_version=$VER" >> "$GITHUB_OUTPUT"
+          echo "bundle_id=$BID" >> "$GITHUB_OUTPUT"
+
+      - name: 打包 IPA
+        id: pack
+        run: |
+          set -euo pipefail
+          VER="${{ steps.verify.outputs.bili_version }}"
+          NAME="BiliBiliMApp_${VER}_livecount-fixed_unsigned"
+          rm -rf Payload && mkdir -p Payload
+          cp -R "build/Build/Products/Release-iphoneos/BiliBiliMD.app" Payload/
+          zip -qry "${NAME}.ipa" Payload
+          rm -rf Payload
+          echo "产物: ${NAME}.ipa  ($(du -h "${NAME}.ipa" | cut -f1))"
+          echo "ipa_name=${NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: 上传 IPA 到 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.ipa_name }}
+          path: ${{ steps.pack.outputs.ipa_name }}.ipa
+          retention-days: 30
+          compression-level: 0
+
+      - name: 编译失败时上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build/Build/Products
+            BiliBiliMD.xcodeproj/project.pbxproj
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: 创建 Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.make_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            TAG="build-$(date +%Y%m%d-%H%M%S)"
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+          cat > notes.md <<'EOF'
+          ## 本次改动
+
+          修复：进入直播间后右上角「人气值 / 在线人数」不显示。
+
+          根因是 `BiliBiliMDDylib/Logos/Home/Live/NJLiveDetailAd` 里为了干掉
+          「热门榜 / 人气榜」，对 `LynxView` 的全部 init 一律 `return nil`。
+          但直播间右上角的人气值同样由 Lynx 渲染，被这一刀切一起干掉了。
+
+          本版本删除了这个过宽的 hook。人气榜入口的移除仍由这几个具体类负责，不受影响：
+
+          - `BBLiveBasePopularHotRankEntryView` / `BBLiveBasePopularRankEntryView` → `initWithFrame:` 返回 nil
+          - `BBLiveVerticalPanelViewController` → `popularRankEntryViews` 返回 nil
+          - `BBLiveBaseAreaRankEntryView` / `BBLiveBaseMixedRankEntryView` → `initWithFrame:` 返回 nil
+
+          CI 已自动断言：产物内不再包含 `LynxView` 引用，且上述人气榜 hook 全部保留。
+
+          ## 安装
+
+          IPA **未签名**，需自行重签后侧载（Sideloadly / AltStore / SideStore / iOS App Signer）。
+          包名为官方包名 `tv.danmaku.bilianime`，安装前请先卸载官方哔哩哔哩。
+
+          ## 致谢
+
+          上游项目：https://github.com/TouchFriend/BiliBiliMApp
+          EOF
+          gh release create "$TAG" \
+            "${{ steps.pack.outputs.ipa_name }}.ipa" \
+            --title "$TAG 修复直播间右上角人数" \
+            --notes-file notes.md
+
+      - name: 构建摘要
+        if: always()
+        run: |
+          {
+            echo "## 构建结果"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| runner | ${{ inputs.runner || 'macos-15' }} ($(uname -m)) |"
+            echo "| 基础 App | ${BASE_APP_ASSET} |"
+            echo "| B 站版本 | ${{ steps.verify.outputs.bili_version }} |"
+            echo "| Bundle ID | ${{ steps.verify.outputs.bundle_id }} |"
+            echo "| IPA | ${{ steps.pack.outputs.ipa_name }}.ipa |"
+            echo "| 签名 | 未签名，需自行重签 |"
+          } >> "$GITHUB_STEP_SUMMARY"

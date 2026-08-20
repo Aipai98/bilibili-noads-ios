@@ -219,30 +219,23 @@
 
 %end
 
-// 热门榜、人气榜
-%hook LynxView
-
-- (id)initWithCoder:(id)coder {
-    return nil;
-}
-
-- (id)init {
-    return nil;
-}
-
-- (id)initWithFrame:(CGRect)frame {
-    return nil;
-}
-
-- (id)initWithBuilderBlock:(id)block {
-    return nil;
-}
-
-- (id)initWithoutRender {
-    return nil;
-}
-
-%end
+// [已移除] 原先这里有一段针对 LynxView 的 hook 块，把 LynxView 的所有 init
+// (initWithCoder: / init / initWithFrame: / initWithBuilderBlock: / initWithoutRender)
+// 一律 return nil，用来干掉「热门榜、人气榜」。
+//
+// 问题：直播间右上角的「人气值 / 在线人数」同样由 Lynx 渲染，被这一刀切一起干掉了，
+// 导致进入直播间后右上角人数不显示。
+//
+// 现状：热门榜 / 人气榜入口的移除已由上方这几个具体类的 hook 负责，删掉 LynxView
+// 一刀切不会让榜单回来：
+//   - BBLiveBasePopularHotRankEntryView  initWithFrame: -> nil
+//   - BBLiveBasePopularRankEntryView     initWithFrame: -> nil
+//   - BBLiveVerticalPanelViewController  popularRankEntryViews -> nil
+//   - BBLiveBaseAreaRankEntryView / BBLiveBaseMixedRankEntryView  initWithFrame: -> nil
+//
+// 后续维护提醒：若某个新版本把人气榜改成纯 Lynx 渲染、导致上面的具体类 hook 失效，
+// 请用 Lookin / Reveal 定位人气榜对应的具体容器类或 Lynx 模板名单独 hook，
+// 不要再退回「hook 所有 LynxView」这种一刀切做法，否则会再次误伤人气值。
 
 // 直播详情-弹幕底部的功能卡
 %hook BBLChronFunctionCard

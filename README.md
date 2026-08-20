@@ -8,6 +8,40 @@
 
 ---
 
+## 🔧 本仓库与上游的差异
+
+本仓库基于 [TouchFriend/BiliBiliMApp](https://github.com/TouchFriend/BiliBiliMApp) `37b8d31`，只做了两件事：
+
+**1. 修复「进入直播间后右上角人气值 / 在线人数不显示」**
+
+`BiliBiliMDDylib/Logos/Home/Live/NJLiveDetailAd` 里为了干掉「热门榜 / 人气榜」，
+对 `LynxView` 的全部 `init` 一律 `return nil`。但直播间右上角的人气值同样由 Lynx 渲染，
+被这一刀切一起干掉了。本仓库删除了这个过宽的 hook。
+
+人气榜入口的移除**不受影响**，仍由这几个具体类的 hook 负责：
+
+| 类 | 被 hook 的方法 |
+| --- | --- |
+| `BBLiveBasePopularHotRankEntryView` | `initWithFrame:` → nil |
+| `BBLiveBasePopularRankEntryView` | `initWithFrame:` → nil |
+| `BBLiveVerticalPanelViewController` | `popularRankEntryViews` → nil |
+| `BBLiveBaseAreaRankEntryView` | `initWithFrame:` → nil |
+| `BBLiveBaseMixedRankEntryView` | `initWithFrame:` → nil |
+
+> ⚠️ 后续维护提醒：如果某个新版本把人气榜改成纯 Lynx 渲染、导致上面的具体类 hook 失效，
+> 请用项目自带的 Lookin / Reveal 定位人气榜对应的具体容器类或 Lynx 模板名单独 hook，
+> **不要再退回「hook 所有 LynxView」这种一刀切做法**，否则会再次误伤人气值。
+
+**2. 新增 GitHub Actions 云端编译**
+
+无需 Mac 也能出包：Actions → `构建未签名 IPA` → `Run workflow`。
+
+工作流会在 macOS runner 上自动安装 theos 与 MonkeyDev、从上游 Release 拉取已脱壳的
+`bili-universal.app`、编译并注入 dylib，最后产出**未签名 IPA**。
+其中还内置了两条断言：产物内必须不含 `LynxView` 引用，且人气榜的具体 hook 必须保留。
+
+---
+
 ## 👀 效果展示
 
 ![](Screenshot/combined_original_resolution.png)
