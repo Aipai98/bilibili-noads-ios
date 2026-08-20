@@ -321,6 +321,33 @@ jobs:
           fi
           echo "清理完成：Frameworks 内已无 libsubstrate.dylib"
 
+      # 启动闪退的真正根因（v3.1.1 之前一直崩的原因）：
+      # 我们用 CODE_SIGNING_ALLOWED=NO 编译并禁用了 pack.sh codesign，导致
+      # 主二进制 bili-universal 和注入的 tweak dylib 都没有 LC_CODE_SIGNATURE。
+      # TrollStore/全能签 的 CoreTrust 绕过只豁免「安装」校验，不豁免「运行时」
+      # dyld 对注入 dylib 的签名检查 —— dyld 加载未签名 dylib 直接 abort，打开即闪退。
+      # 上游可用包是全签名包（主二进制+所有 dylib 都有签名），所以任何工具都能跑。
+      # 这里对整包做 ad-hoc 签名，补齐所有 LC_CODE_SIGNATURE，与上游发行格式一致。
+      - name: Ad-hoc 签名整个 .app（修复 TrollStore / 全能签 启动闪退）
+        run: |
+          set -euo pipefail
+          APP_SRC="build/Build/Products/Release-iphoneos/BiliBiliMD.app"
+          codesign -f -s - --timestamp=none "$APP_SRC"
+          # 校验：主二进制与 tweak dylib 都必须已带 ad-hoc 签名
+          if codesign -dv "$APP_SRC" 2>&1 | grep -qi "Signature=adhoc"; then
+            echo "断言通过：主二进制已 ad-hoc 签名"
+          else
+            echo "::error::主二进制 ad-hoc 签名失败"
+            exit 1
+          fi
+          if codesign -dv "$APP_SRC/Frameworks/libBiliBiliMDDylib.dylib" 2>&1 | grep -qi "Signature=adhoc"; then
+            echo "断言通过：tweak dylib 已 ad-hoc 签名"
+          else
+            echo "::error::tweak dylib 未签名"
+            exit 1
+          fi
+          echo "整包 ad-hoc 签名完成"
+
       - name: 打包 IPA
         id: pack
         run: |
@@ -394,13 +421,13 @@ jobs:
 
           ## 安装
 
-          IPA **未签名**，需自行重签后侧载。
+          本版本为 **ad-hoc 签名包**（主二进制 + 注入 dylib 全部补齐 `LC_CODE_SIGNATURE`），
+          解决了 TrollStore / 全能签 下「安装成功但打开闪退」的问题。
 
-          - **TrollStore（巨魔）/ 全能签**：本版本已改用现代 **ElleKit**（`libellekit.dylib`）
-            替代旧版 Cydia Substrate，可在 CoreTrust 绕过环境下正常加载 hook，不会闪退。
-            直接用巨魔 / 全能签安装即可。
-          - **Sideloadly / AltStore / SideStore / iOS App Signer**：同样可用，但需设备已越狱
-            （ElleKit 与 Substrate  alike 都依赖越狱 / 巨魔环境，普通未越狱自签无法加载 hook）。
+          - **TrollStore（巨魔）/ 全能签**：直接安装即可，不再闪退。
+            此前版本未签名，dyld 运行时拒绝加载未签名的注入 dylib，导致打开即闪退；
+            本版已与上游发行格式对齐（全签名）。
+          - 说明：ElleKit 与 Substrate 都依赖越狱 / 巨魔环境，普通未越狱自签无法加载 hook。
 
           包名为官方包名 `tv.danmaku.bilianime`，安装前请先卸载官方哔哩哔哩。
 
