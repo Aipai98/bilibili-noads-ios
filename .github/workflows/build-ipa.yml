@@ -175,19 +175,18 @@ jobs:
           fi
           echo "脱壳校验通过 (cryptid=0)"
 
-      # 两处 CI 适配，都是「关掉在 CI 上没用还会炸的构建阶段」：
-      #  1) md --xcbp-logos：从 .xm 重新生成 .mm。仓库里 17 个 .mm 全部已提交，
-      #     且 pbxproj 编译的正是 .mm，重新生成只会引入 Logos 版本差异风险。
-      #  2) pack.sh codesign：我们产出未签名 IPA，交给 Sideloadly / AltStore 自签。
-      - name: CI 适配 pbxproj（关闭 Logos 预处理与签名阶段）
+      # [修复 v3.1.7] 之前跳过了 md --xcbp-logos（Logos 预处理），直接编译仓库提交的 .mm。
+      # 但仓库提交的 .mm 可能是旧 Logos 生成的陈旧产物，导致功能 hook 注册失效
+      # （隔离测试证实：上游 base + 我们 dylib 设置失效，上游自己构建的 dylib 正常）。
+      # 上游本地构建会用 Logos 从 .xm 重新生成 .mm，这里恢复该阶段，与上游构建方式对齐。
+      # 仅保留跳过 pack.sh codesign（我们打包时统一 ad-hoc 签名）。
+      - name: CI 适配 pbxproj（恢复 Logos 预处理，仅跳过签名阶段）
         run: |
           python3 - <<'PY'
           import re, sys
           p = "BiliBiliMD.xcodeproj/project.pbxproj"
           s = open(p, encoding="utf-8").read()
           repl = {
-              'shellScript = "/opt/MonkeyDev/bin/md --xcbp-logos\\n";':
-                  'shellScript = "echo \\"[CI] 跳过 Logos 预处理，直接编译仓库内已提交的 .mm\\"\\n";',
               'shellScript = "/opt/MonkeyDev/Tools/pack.sh codesign\\n";':
                   'shellScript = "echo \\"[CI] 跳过 codesign，产出未签名 IPA\\"\\n";',
           }
@@ -196,6 +195,9 @@ jobs:
                   print("::error::pbxproj 里没找到待替换片段: %s" % old); sys.exit(1)
               s = s.replace(old, new)
               print("已替换:", old.strip())
+          # Logos 预处理阶段（md --xcbp-logos）保持原样，构建时会重新生成 .mm
+          assert 'md --xcbp-logos' in s, "md --xcbp-logos 阶段丢失"
+          print("已确认 md --xcbp-logos 阶段保留（构建时重新生成 .mm）")
           # pack.sh 本体必须保留（负责合并目标 App + 注入 dylib）
           assert 'shellScript = "/opt/MonkeyDev/Tools/pack.sh\\n";' in s, "pack.sh 主阶段丢失"
           print("已确认 pack.sh 主阶段保留")
