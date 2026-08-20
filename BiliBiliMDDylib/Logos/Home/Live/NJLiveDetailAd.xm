@@ -37,51 +37,7 @@
 
 %end
 
-// 全屏topBar
-@interface BBLivePoliticalFullScreenTopBar : UIView
 
-// 用户排名列表
-@property (retain, nonatomic) UIView *userRankListEntryView;
-
-@end
-
-%hook BBLivePoliticalFullScreenTopBar
-
-- (void)layoutSubviews {
-    %orig;
-    // 用户排名列表
-    [self.userRankListEntryView removeFromSuperview];
-    self.userRankListEntryView = nil;
-}
-
-- (void)_updateUserRankListEntryViewIfNeed {
-    
-}
-
-%end
-
-// 竖屏topBar
-@interface BBLiveVerticalTopBar : UIView
-
-// 用户排名列表
-@property (retain, nonatomic) UIView *userRankListEntryView;
-
-@end
-
-%hook BBLiveVerticalTopBar
-
-- (void)layoutSubviews {
-    %orig;
-    // 用户排名列表
-    [self.userRankListEntryView removeFromSuperview];
-    self.userRankListEntryView = nil;
-}
-
-- (void)_updateUserRankListEntryViewIfNeed {
-    
-}
-
-%end
 
 // 人气榜
 %hook BBLiveBasePopularHotRankEntryView
@@ -234,6 +190,16 @@
 // 人数一起干掉。移除后右上角人数恢复显示；代价是「观赛活动、更多直播入口」
 // 这类右上角广告入口也会回来。若后续要单独去掉这些入口，用 Lookin/Reveal
 // 定位具体入口组件类，不要用 manager 一刀切。
+
+// [已移除 v3.1.5] BBLivePoliticalFullScreenTopBar / BBLiveVerticalTopBar 的
+// layoutSubviews remove userRankListEntryView + _updateUserRankListEntryViewIfNeed
+// 这两个 hook。注释里说 userRankListEntryView 是「用户排名列表」，但在
+// B 站 8.89.0 该位置实际显示的是「人气值/在线人数」（即直播间顶部 bar
+// 关注按钮右侧的「489」类数字），hook 直接把它从视图树里 removeFromSuperview
+// 并阻止重建，导致右上角人数不显示。移除后人气值恢复。热门榜/人气榜
+// 是 Lynx 渲染的（具体类 hook 拦不住），不受这两个 hook 控制；若要保留
+// 顶部 rank 入口但不要误伤人数，需用 Lookin/Reveal 定位 8.89.0 中实际
+// 承载「排名入口」的具体子视图类，单独 hook 那个子视图。
 
 // 直播详情-弹幕底部的功能卡
 %hook BBLChronFunctionCard
