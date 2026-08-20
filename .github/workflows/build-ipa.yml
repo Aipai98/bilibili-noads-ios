@@ -271,6 +271,56 @@ jobs:
           echo "bili_version=$VER" >> "$GITHUB_OUTPUT"
           echo "bundle_id=$BID" >> "$GITHUB_OUTPUT"
 
+      # TrollStore / 全能签（CoreTrust 绕过、不跑 substrated 守护进程）下，
+      # MonkeyDev 注入的旧版 Cydia Substrate（libsubstrate.dylib，FAT armv7+arm64）
+      # 在首次加载 hook 时崩溃，表现为「签名/巨魔安装成功但打开闪退」。
+      # 上游可用包改用现代 ElleKit（libellekit.dylib）。这里把注入的 hooking 库换成
+      # 仓库内 vendored 的 libellekit.dylib，并改掉 tweak dylib 的弱加载命令名。
+      - name: 注入 ElleKit 替代 Cydia Substrate（修复 TrollStore / 全能签 闪退）
+        run: |
+          set -euo pipefail
+          APP_SRC="build/Build/Products/Release-iphoneos/BiliBiliMD.app"
+          FRAME="$APP_SRC/Frameworks"
+          test -d "$FRAME" || { echo "::error::没有 Frameworks 目录"; exit 1; }
+          test -f "Vendor/libellekit.dylib" || { echo "::error::缺少 Vendor/libellekit.dylib"; exit 1; }
+
+          # 1) 放入已知可用的 libellekit.dylib（取自上游可用 IPA，随仓库 vendored）
+          cp -f "Vendor/libellekit.dylib" "$FRAME/libellekit.dylib"
+          chmod 755 "$FRAME/libellekit.dylib"
+          echo "已放入 libellekit.dylib: $(lipo -info "$FRAME/libellekit.dylib")"
+
+          # 2) 把任何对 Cydia Substrate 的弱加载命令改指 libellekit。
+          #    tweak dylib 记录的为 cmd=0x80000018 -> @executable_path/Frameworks/libsubstrate.dylib
+          changed=0
+          for d in "$FRAME"/*.dylib; do
+            [ -f "$d" ] || continue
+            if otool -L "$d" 2>/dev/null | grep -q "libsubstrate.dylib"; then
+              install_name_tool -change \
+                "@executable_path/Frameworks/libsubstrate.dylib" \
+                "@executable_path/Frameworks/libellekit.dylib" \
+                "$d"
+              echo "已重指: $d"
+              changed=$((changed+1))
+            fi
+          done
+          echo "重指 dylib 数: $changed"
+
+          # 3) 删除旧 Cydia Substrate（FAT armv7+arm64，TrollStore 下会崩）
+          rm -f "$FRAME/libsubstrate.dylib"
+
+          # 4) 校验：tweak dylib 现在必须加载 libellekit，且不再引用 libsubstrate
+          if otool -L "$FRAME/libBiliBiliMDDylib.dylib" | grep -q "libellekit.dylib"; then
+            echo "断言通过：tweak dylib 已改加载 libellekit.dylib"
+          else
+            echo "::error::tweak dylib 未成功改指 libellekit.dylib"
+            exit 1
+          fi
+          if otool -L "$FRAME/libBiliBiliMDDylib.dylib" | grep -q "libsubstrate.dylib"; then
+            echo "::error::仍存在 libsubstrate 引用"
+            exit 1
+          fi
+          echo "清理完成：Frameworks 内已无 libsubstrate.dylib"
+
       - name: 打包 IPA
         id: pack
         run: |
@@ -344,7 +394,14 @@ jobs:
 
           ## 安装
 
-          IPA **未签名**，需自行重签后侧载（Sideloadly / AltStore / SideStore / iOS App Signer）。
+          IPA **未签名**，需自行重签后侧载。
+
+          - **TrollStore（巨魔）/ 全能签**：本版本已改用现代 **ElleKit**（`libellekit.dylib`）
+            替代旧版 Cydia Substrate，可在 CoreTrust 绕过环境下正常加载 hook，不会闪退。
+            直接用巨魔 / 全能签安装即可。
+          - **Sideloadly / AltStore / SideStore / iOS App Signer**：同样可用，但需设备已越狱
+            （ElleKit 与 Substrate  alike 都依赖越狱 / 巨魔环境，普通未越狱自签无法加载 hook）。
+
           包名为官方包名 `tv.danmaku.bilianime`，安装前请先卸载官方哔哩哔哩。
 
           ## 致谢
