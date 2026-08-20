@@ -235,7 +235,7 @@ jobs:
           # 本次修复的核心断言：整个工程只有 NJLiveDetailAd 引用过 LynxView，
           # 且引用方式是 objc_getClass("LynxView")，字符串会落进 __cstring。
           # 所以编译产物里只要还能搜到 LynxView，就说明 hook 没摘干净。
-          if strings -a "$DYLIB" | grep -qx "LynxView"; then
+          if grep -a -q "LynxView" "$DYLIB"; then
             echo "::error::dylib 里仍存在 LynxView 字符串，一刀切 hook 未摘除干净"
             exit 1
           fi
@@ -243,7 +243,7 @@ jobs:
 
           # 人气榜的具体 hook 必须还在，否则等于把广告移除也一起删了
           for cls in BBLiveBasePopularRankEntryView BBLiveBasePopularHotRankEntryView; do
-            if strings -a "$DYLIB" | grep -qx "$cls"; then
+            if grep -a -q "$cls" "$DYLIB"; then
               echo "断言通过：$cls hook 保留"
             else
               echo "::error::$cls hook 丢失，人气榜入口会重新出现"
