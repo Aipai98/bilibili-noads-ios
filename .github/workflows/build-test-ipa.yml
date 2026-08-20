@@ -1,0 +1,75 @@
+name: 构建测试包(上游base+我们dylib)
+
+# 手动触发：在 Actions 页面点 Run workflow，或在下面 workflow_dispatch 输入里填参数。
+# 产物 = 上游可用包(全功能正常) + 我们编译的 libBiliBiliMDDylib.dylib(含人数修复)。
+on:
+  workflow_dispatch:
+    inputs:
+      ours_release:
+        description: "我们这边提供 dylib 的 release tag（默认 v3.1.6，人数修复+NSUserDefaults）"
+        required: false
+        default: "v3.1.6"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 组装上游+我们的 dylib 并打包
+    runs-on: macos-15
+    timeout-minutes: 40
+
+    steps:
+      - name: 下载我们的 release IPA（取 dylib）
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.ours_release }}"
+          echo "ours release: $TAG"
+          # 从 release API 拿 IPA 直链
+          curl -sL "https://api.github.com/repos/Aipai98/bilibili-noads-ios/releases/tags/${TAG}" \
+            -o rel.json
+          URL=$(python3 -c "import json;d=json.load(open('rel.json'));print([a['browser_download_url'] for a in d.get('assets',[]) if a['name'].endswith('.ipa')][0])")
+          echo "our IPA: $URL"
+          curl -fL --retry 3 -o ours.ipa "$URL"
+          echo "ours.ipa 大小: $(du -h ours.ipa | cut -f1)"
+
+      - name: 下载上游 IPA（TouchFriend 3.1.0，全功能正常）
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o upstream.ipa \
+            "https://github.com/TouchFriend/BiliBiliMApp/releases/download/3.1.0/BiliBiliMApp_8.89.0.v3.1.0.ipa"
+          echo "upstream.ipa 大小: $(du -h upstream.ipa | cut -f1)"
+
+      - name: 交换 dylib 并打包
+        run: |
+          set -euo pipefail
+          rm -rf up ours_tmp Payload
+          mkdir -p up ours_tmp Payload
+          unzip -q upstream.ipa -d up
+          unzip -q ours.ipa -d ours_tmp
+
+          OUR_DYLIB=$(find ours_tmp -path '*Frameworks/libBiliBiliMDDylib.dylib' -type f | head -n1)
+          UP_DYLIB=$(find up -path '*Frameworks/libBiliBiliMDDylib.dylib' -type f | head -n1)
+          test -n "$OUR_DYLIB" && test -n "$UP_DYLIB" || { echo "::error::找不到 dylib"; exit 1; }
+
+          echo "替换: $UP_DYLIB <- $OUR_DYLIB"
+          cp -f "$OUR_DYLIB" "$UP_DYLIB"
+          chmod 755 "$UP_DYLIB"
+
+          # 整包 ad-hoc 重签（TrollStore 下签名本可忽略，重签更稳）
+          APP=$(find up -maxdepth 3 -type d -name '*.app' | head -n1)
+          echo "app: $APP"
+          codesign -f -s - --timestamp=none "$APP" || echo "codesign 警告，继续"
+
+          cp -R "$APP" Payload/
+          zip -qry test_upstream_base_our_dylib.ipa Payload
+          rm -rf Payload
+          echo "产物: test_upstream_base_our_dylib.ipa ($(du -h test_upstream_base_our_dylib.ipa | cut -f1))"
+
+      - name: 上传 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test_upstream_base_our_dylib
+          path: test_upstream_base_our_dylib.ipa
+          retention-days: 30
+          compression-level: 0
