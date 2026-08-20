@@ -25,12 +25,9 @@ jobs:
           set -euo pipefail
           TAG="${{ inputs.ours_release }}"
           echo "ours release: $TAG"
-          # 从 release API 拿 IPA 直链
-          curl -sL "https://api.github.com/repos/Aipai98/bilibili-noads-ios/releases/tags/${TAG}" \
-            -o rel.json
-          URL=$(python3 -c "import json;d=json.load(open('rel.json'));print([a['browser_download_url'] for a in d.get('assets',[]) if a['name'].endswith('.ipa')][0])")
-          echo "our IPA: $URL"
-          curl -fL --retry 3 -o ours.ipa "$URL"
+          # 直链下载，避免 GitHub API 未认证限流
+          curl -fL --retry 3 -o ours.ipa \
+            "https://github.com/Aipai98/bilibili-noads-ios/releases/download/${TAG}/BiliBiliMApp_8.76.0_livecount-fixed_unsigned.ipa"
           echo "ours.ipa 大小: $(du -h ours.ipa | cut -f1)"
 
       - name: 下载上游 IPA（TouchFriend 3.1.0，全功能正常）
