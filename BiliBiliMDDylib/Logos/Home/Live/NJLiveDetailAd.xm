@@ -127,15 +127,6 @@
 
 %end
 
-// 右上角入口，比如观赛活动、更多直播入口
-%hook BBLiveTopRightEntranceManager
-
-- (id)init {
-    return nil;
-}
-
-%end
-
 // 右下角活动，比如LOL投稿有奖
 %hook BBLiveChainView
 
@@ -236,6 +227,13 @@
 // 后续维护提醒：若某个新版本把人气榜改成纯 Lynx 渲染、导致上面的具体类 hook 失效，
 // 请用 Lookin / Reveal 定位人气榜对应的具体容器类或 Lynx 模板名单独 hook，
 // 不要再退回「hook 所有 LynxView」这种一刀切做法，否则会再次误伤人气值。
+
+// [已移除 v3.1.4] BBLiveTopRightEntranceManager 的 init -> nil hook。
+// 该管理器负责创建直播间「右上角」整块 UI（含 人气值/在线人数 的原生组件
+// BBLiveScrollNumberView / BBLiveRoomPopularityInfo），init 返回 nil 会把
+// 人数一起干掉。移除后右上角人数恢复显示；代价是「观赛活动、更多直播入口」
+// 这类右上角广告入口也会回来。若后续要单独去掉这些入口，用 Lookin/Reveal
+// 定位具体入口组件类，不要用 manager 一刀切。
 
 // 直播详情-弹幕底部的功能卡
 %hook BBLChronFunctionCard
