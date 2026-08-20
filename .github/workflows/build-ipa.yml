@@ -332,21 +332,24 @@ jobs:
         run: |
           set -euo pipefail
           APP_SRC="build/Build/Products/Release-iphoneos/BiliBiliMD.app"
+          FRAME="$APP_SRC/Frameworks"
+          # 注意：codesign 对 bundle 的签名只会给主二进制加 LC_CODE_SIGNATURE，
+          # 未签名的嵌套 Frameworks dylib 不会各自补签名（只是封进 CodeResources）。
+          # dyld 运行时要求注入 dylib 自带签名，所以必须先逐个签 dylib，再签整包封存。
+          for d in "$FRAME"/*.dylib; do
+            [ -f "$d" ] || continue
+            codesign -f -s - --timestamp=none "$d"
+            echo "已签: $(basename "$d")"
+          done
           codesign -f -s - --timestamp=none "$APP_SRC"
-          # 校验：主二进制与 tweak dylib 都必须已带 ad-hoc 签名
-          if codesign -dv "$APP_SRC" 2>&1 | grep -qi "Signature=adhoc"; then
-            echo "断言通过：主二进制已 ad-hoc 签名"
-          else
-            echo "::error::主二进制 ad-hoc 签名失败"
-            exit 1
-          fi
-          if codesign -dv "$APP_SRC/Frameworks/libBiliBiliMDDylib.dylib" 2>&1 | grep -qi "Signature=adhoc"; then
-            echo "断言通过：tweak dylib 已 ad-hoc 签名"
-          else
-            echo "::error::tweak dylib 未签名"
-            exit 1
-          fi
-          echo "整包 ad-hoc 签名完成"
+          # 校验：主二进制与所有 dylib 都必须已带 ad-hoc 签名
+          codesign -dv "$APP_SRC" 2>&1 | grep -qi "Signature=adhoc" \
+            || { echo "::error::主二进制 ad-hoc 签名失败"; exit 1; }
+          codesign -dv "$FRAME/libBiliBiliMDDylib.dylib" 2>&1 | grep -qi "Signature=adhoc" \
+            || { echo "::error::tweak dylib 未签名"; exit 1; }
+          codesign -dv "$FRAME/libellekit.dylib" 2>&1 | grep -qi "Signature=adhoc" \
+            || { echo "::error::libellekit.dylib 未签名"; exit 1; }
+          echo "整包 ad-hoc 签名完成（主二进制 + $(ls "$FRAME"/*.dylib | wc -l | tr -d ' ') 个 dylib）"
 
       - name: 打包 IPA
         id: pack
