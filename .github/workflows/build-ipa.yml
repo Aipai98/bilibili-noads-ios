@@ -204,6 +204,44 @@ jobs:
           open(p, "w", encoding="utf-8").write(s)
           PY
 
+      # [v3.1.8] 之前依赖 pbxproj 的 md --xcbp-logos 跑 Logos 重新生成 .mm，
+      # 但实测 v3.1.7 dylib 与 v3.1.6 字节级完全一致（sha256 相同）——md 没真正跑成，CI 继续用了仓库提交的旧 .mm，
+      # 旧 .mm 是旧 Logos 生成，目标类名跟 B 站 8.89.0 对不上 → 主界面 hook（NJTabAd/NJMallAd/NJAccount）注册失败。
+      # 这里绕开 md，直接调用 theos 的 logos.pl 重新生成所有 .mm（兜底）。
+      - name: 显式用 logos.pl 重新生成所有 .mm
+        run: |
+          set -euo pipefail
+          THEOS=/opt/theos
+          LOGOS=$(find "$THEOS" -name "logos.pl" -type f 2>/dev/null | head -n1)
+          if [ -z "$LOGOS" ]; then
+            echo "::error::在 $THEOS 下找不到 logos.pl"
+            exit 1
+          fi
+          echo "使用 logos.pl: $LOGOS"
+          chmod +x "$LOGOS" 2>/dev/null || true
+          # 对 BiliBiliMDDylib 下所有 .xm 重新生成 .mm（备份原文件，失败可回退）
+          REGEN_OK=0
+          REGEN_FAIL=0
+          find BiliBiliMDDylib -name "*.xm" -type f | while read -r xm; do
+            mm="${xm%.xm}.mm"
+            if [ -f "$mm" ]; then cp "$mm" "${mm}.bak"; fi
+            if "$LOGOS" "$xm" > "$mm" 2>/dev/null; then
+              echo "  ✓ ${mm}"
+              REGEN_OK=$((REGEN_OK+1))
+            else
+              echo "  ✗ 失败 $xm"
+              [ -f "${mm}.bak" ] && mv "${mm}.bak" "$mm" || true
+              REGEN_FAIL=$((REGEN_FAIL+1))
+            fi
+          done
+          # 验证 NJLiveDetailAd.mm 已无 LynxView 引用（人数修复）
+          if grep -a -q "LynxView" BiliBiliMDDylib/Logos/Home/Live/NJLiveDetailAd.mm; then
+            echo "::error::NJLiveDetailAd.mm 仍有 LynxView 引用,人数修复未生效"
+            exit 1
+          fi
+          echo "✓ 验证:NJLiveDetailAd.mm 已无 LynxView 引用"
+          echo "  重新生成成功: $REGEN_OK, 失败: $REGEN_FAIL"
+
       - name: xcodebuild 编译（Release / arm64 / 不签名）
         run: |
           set -o pipefail
