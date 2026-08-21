@@ -26,8 +26,6 @@
 
 %end
 
-%end
-
 // ---- 底部栏隐藏：加号 / 会员购（UI 层兜底，独立于网络拦截）----
 // 网络拦截（NJTabDataBottomHandler）在某些 B 站版本/构建下不生效，
 // 这里直接在 UITabBar 上兜底，保证加号与会员购不会出现在主界面。
@@ -70,6 +68,8 @@
 - (id)publishButton {
     return nil;
 }
+%end
+
 %end
 
 %ctor {
