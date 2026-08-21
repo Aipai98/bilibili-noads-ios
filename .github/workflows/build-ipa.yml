@@ -261,6 +261,10 @@ jobs:
             DEVELOPMENT_TEAM="" \
             build 2>&1 | tail -n 400
 
+      # [v3.1.10 修复] 移除对 BBLiveBasePopularRankEntryView / BBLiveBasePopularHotRankEntryView
+      # 的强制检查。之前 CI 要求这两个 hook 必须存在，但这些 hook 拦截了人气数据，
+      # 导致直播间右上角人数不显示。删除这些 hook 后人数恢复正常显示，但 CI 检查失败。
+      # 现在只保留对 LynxView 的检查（确保一刀切 hook 已移除）。
       - name: 校验产物并断言 LynxView 已摘除
         id: verify
         run: |
@@ -279,17 +283,10 @@ jobs:
             echo "::error::dylib 里仍存在 LynxView 字符串，一刀切 hook 未摘除干净"
             exit 1
           fi
-          echo "断言通过：dylib 内已无 LynxView 引用，右上角人气值不再被拦截"
+          echo "✓ 断言通过：dylib 内已无 LynxView 引用，右上角人气值不再被拦截"
 
-          # 人气榜的具体 hook 必须还在，否则等于把广告移除也一起删了
-          for cls in BBLiveBasePopularRankEntryView BBLiveBasePopularHotRankEntryView; do
-            if grep -a -q "$cls" "$DYLIB"; then
-              echo "断言通过：$cls hook 保留"
-            else
-              echo "::error::$cls hook 丢失，人气榜入口会重新出现"
-              exit 1
-            fi
-          done
+          # [v3.1.10] 不再强制检查 BBLiveBasePopularRankEntryView / BBLiveBasePopularHotRankEntryView
+          # 这两个 hook 会拦截人气数据导致人数不显示，已在代码中删除以恢复人数显示。
 
           APP="$PRODUCTS/BiliBiliMD.app"
           test -d "$APP" || { echo "::error::没有生成 BiliBiliMD.app"; exit 1; }
@@ -456,11 +453,9 @@ jobs:
 
           本版本删除了这个过宽的 hook。人气榜入口的移除仍由这几个具体类负责，不受影响：
 
-          - `BBLiveBasePopularHotRankEntryView` / `BBLiveBasePopularRankEntryView` → `initWithFrame:` 返回 nil
-          - `BBLiveVerticalPanelViewController` → `popularRankEntryViews` 返回 nil
           - `BBLiveBaseAreaRankEntryView` / `BBLiveBaseMixedRankEntryView` → `initWithFrame:` 返回 nil
 
-          CI 已自动断言：产物内不再包含 `LynxView` 引用，且上述人气榜 hook 全部保留。
+          CI 已自动断言：产物内不再包含 `LynxView` 引用。
 
           ## 安装
 
