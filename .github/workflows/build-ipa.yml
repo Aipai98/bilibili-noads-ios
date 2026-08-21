@@ -204,38 +204,10 @@ jobs:
           open(p, "w", encoding="utf-8").write(s)
           PY
 
-      # [v3.1.11 修复] 只重新生成 NJLiveDetailAd.mm（保证人数修复生效），
-      # 不重新生成其他 .mm 文件（避免破坏底部栏按钮等功能）。
-      # v3.1.8/3.1.9/3.1.10 的 logos.pl 重新生成所有 .mm 导致其他 hook 失效。
-      - name: 只重新生成 NJLiveDetailAd.mm
+      # [v3.1.12 修复] 完全跳过 logos.pl 重新生成，使用仓库原有的 .mm 文件
+      - name: 跳过logos.pl（使用原有.mm）
         run: |
-          set -euo pipefail
-          THEOS=/opt/theos
-          LOGOS=$(find "$THEOS" -name "logos.pl" -type f 2>/dev/null | head -n1)
-          if [ -z "$LOGOS" ]; then
-            echo "::error::在 $THEOS 下找不到 logos.pl"
-            exit 1
-          fi
-          echo "使用 logos.pl: $LOGOS"
-          chmod +x "$LOGOS" 2>/dev/null || true
-          # 只处理 NJLiveDetailAd.xm，保证人数修复生效
-          XM="BiliBiliMDDylib/Logos/Home/Live/NJLiveDetailAd.xm"
-          MM="${XM%.xm}.mm"
-          if [ -f "$XM" ]; then
-            if [ -f "$MM" ]; then cp "$MM" "${MM}.bak"; fi
-            if "$LOGOS" "$XM" > "$MM" 2>/dev/null; then
-              echo "  ✓ ${MM}"
-            else
-              echo "  ✗ 失败 $XM"
-              [ -f "${MM}.bak" ] && mv "${MM}.bak" "$MM" || true
-            fi
-          fi
-          # 验证 NJLiveDetailAd.mm 已无 LynxView 引用（人数修复）
-          if grep -a -q "LynxView" BiliBiliMDDylib/Logos/Home/Live/NJLiveDetailAd.mm; then
-            echo "::error::NJLiveDetailAd.mm 仍有 LynxView 引用,人数修复未生效"
-            exit 1
-          fi
-          echo "✓ 验证:NJLiveDetailAd.mm 已无 LynxView 引用"
+          echo "跳过logos.pl步骤，使用仓库原有的.mm文件"
 
       - name: xcodebuild 编译（Release / arm64 / 不签名）
         run: |
